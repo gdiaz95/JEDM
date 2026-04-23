@@ -1,0 +1,21 @@
+[project]
+name = "jedm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "mostlyai-qa>=1.10.4",
+    "npgc>=0.2.0",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "pytest>=9.0.3",
+    "python-dotenv>=1.2.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.15.3",
+    "sdmetrics>=0.25.0",
+    "sdv>=1.32.1",
+    "seaborn>=0.13.2",
+    "xgboost>=3.2.0",
+]
