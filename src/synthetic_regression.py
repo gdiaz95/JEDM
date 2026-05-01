@@ -54,6 +54,16 @@ B = 1000
 # ε = None means no differential privacy (∞ budget)
 EPSILONS: list[float | None] = [0.1, 0.5, 1.0, 2.0, 5.0, None]
 
+# Experiment configs: baseline, each fix alone, all fixes
+CONFIGS: list[dict] = [
+    {"name": "baseline",          "marginal_scale": False, "corr_formula": False, "corr_noise": False, "corr_delta": False},
+    {"name": "fix_marginal_scale","marginal_scale": True,  "corr_formula": False, "corr_noise": False, "corr_delta": False},
+    {"name": "fix_corr_formula",  "marginal_scale": False, "corr_formula": True,  "corr_noise": False, "corr_delta": False},
+    {"name": "fix_corr_noise",    "marginal_scale": False, "corr_formula": False, "corr_noise": True,  "corr_delta": False},
+    {"name": "fix_corr_delta",    "marginal_scale": False, "corr_formula": False, "corr_noise": False, "corr_delta": True},
+    {"name": "all_fixes",         "marginal_scale": True,  "corr_formula": True,  "corr_noise": True,  "corr_delta": True},
+]
+
 DROP_COLS: dict[str, list[str]] = {
     "students_oulad.csv": ["date_unregistration"],
 }
@@ -291,15 +301,34 @@ def save_analysis(name: str, syn: dict, gt: dict, label: str) -> tuple[float, fl
 # Per-dataset bootstrap
 # ---------------------------------------------------------------------------
 
-def run_dataset(cfg: dict, epsilon: float | None, label: str) -> tuple[float, float]:
+def run_dataset(cfg: dict, epsilon: float | None, label: str, exp: dict) -> tuple[float, float]:
     """
-    Run B-sample bootstrap for one dataset at a given epsilon.
+    Run B-sample bootstrap for one dataset at a given epsilon and experiment config.
     Returns (mean_bias, mean_coverage_naive) across non-intercept coefficients.
     """
     meta     = load_metadata(cfg["meta"])
     filename = meta["filename"]
     name     = Path(filename).stem
     target   = meta["target_column"]
+
+    # Skip if bootstrap results already exist
+    syn_path  = REPORT_DIR / label / f"{name}.json"
+    anal_path = ANAL_DIR   / label / f"{name}.json"
+    if syn_path.exists():
+        print(f"\n  [SKIP] {filename}  |  ε={epsilon}  — already exists at {syn_path.relative_to(ROOT)}")
+        if anal_path.exists():
+            with open(anal_path) as f:
+                anal = json.load(f)
+            return anal.get("mean_bias", float("nan")), anal.get("mean_coverage_naive", float("nan"))
+        # syn exists but analysis missing — recompute analysis only
+        with open(syn_path) as f:
+            syn = json.load(f)
+        gt_path = GT_DIR / f"{name}.json"
+        if gt_path.exists():
+            with open(gt_path) as f:
+                gt = json.load(f)
+            return save_analysis(name, syn, gt, label)
+        return float("nan"), float("nan")
 
     print(f"\n  Dataset : {filename}  |  ε={epsilon}  |  B={B}")
 
@@ -323,10 +352,16 @@ def run_dataset(cfg: dict, epsilon: float | None, label: str) -> tuple[float, fl
     df_for_npgc = df_for_npgc.drop(columns=[c for c in enc.high_nan_cols if c in df_for_npgc.columns])
     df_for_npgc = df_for_npgc.dropna(subset=[enc.target_col])
 
-    # 3. Fit NPGC once with the given epsilon
+    # 3. Fit NPGC once with the given epsilon and experiment flags
     t_fit = time.perf_counter()
     print(f"  Fitting NPGC (ε={epsilon}) … ", end="", flush=True)
-    npgc = NPGC_local(epsilon=epsilon)
+    npgc = NPGC_local(
+        epsilon=epsilon,
+        marginal_scale=exp["marginal_scale"],
+        corr_formula=exp["corr_formula"],
+        corr_noise=exp["corr_noise"],
+        corr_delta=exp["corr_delta"],
+    )
     npgc.fit(df_for_npgc)
     print(f"done  ({time.perf_counter() - t_fit:.1f}s)")
 
@@ -371,6 +406,13 @@ def run_dataset(cfg: dict, epsilon: float | None, label: str) -> tuple[float, fl
         "target_column":  target,
         "target_classes": enc.target_classes,
         "epsilon":        epsilon,
+        "config":         exp["name"],
+        "flags": {
+            "marginal_scale": exp["marginal_scale"],
+            "corr_formula":   exp["corr_formula"],
+            "corr_noise":     exp["corr_noise"],
+            "corr_delta":     exp["corr_delta"],
+        },
         "B":              B,
         "n_successful":   n_ok,
         "n_rows":         n_rows,
@@ -406,7 +448,7 @@ def run_dataset(cfg: dict, epsilon: float | None, label: str) -> tuple[float, fl
 # Summary table
 # ---------------------------------------------------------------------------
 
-def print_and_save_table(sweep: dict[str, dict[str, tuple[float, float]]]) -> None:
+def print_and_save_table(sweep: dict[str, dict[str, tuple[float, float]]], config_name: str = "") -> None:
     """
     sweep: { eps_label → { dataset_name → (mean_bias, mean_coverage) } }
     Prints and saves the ε × (bias, coverage) summary table.
@@ -438,8 +480,9 @@ def print_and_save_table(sweep: dict[str, dict[str, tuple[float, float]]]) -> No
 
     print(sep)
 
-    table_path = ANAL_DIR / "epsilon_sweep_table.json"
-    ANAL_DIR.mkdir(parents=True, exist_ok=True)
+    table_dir = ANAL_DIR / config_name if config_name else ANAL_DIR
+    table_dir.mkdir(parents=True, exist_ok=True)
+    table_path = table_dir / "epsilon_sweep_table.json"
     with open(table_path, "w") as f:
         json.dump(rows, f, indent=2)
     print(f"\nSummary table saved : {table_path.relative_to(ROOT)}")
@@ -477,7 +520,8 @@ def run_all():
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     ANAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    log_path = ROOT / "logs" / f"synthetic_regression_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    config_slug = "+".join(c["name"] for c in CONFIGS)
+    log_path = ROOT / "logs" / f"synthetic_regression_{config_slug}.log"
     tee = _Tee(log_path)
     sys.stdout = tee
 
@@ -485,46 +529,56 @@ def run_all():
         print(f"Run started : {datetime.now().isoformat(timespec='seconds')}")
         print(f"Log file    : {log_path}")
         print(f"B={B}  |  ε values: {EPSILONS}")
+        print(f"Configs     : {[c['name'] for c in CONFIGS]}")
         print(f"Datasets    : {[d['meta'] for d in DATASETS]}\n")
 
-        n_total  = len(EPSILONS) * len(DATASETS)
+        n_total  = len(CONFIGS) * len(EPSILONS) * len(DATASETS)
         run_idx  = 0
         t_global = time.perf_counter()
 
-        sweep: dict[str, dict[str, tuple[float, float]]] = {}
+        for cfg_i, exp in enumerate(CONFIGS, 1):
+            print(f"\n{'*'*60}")
+            print(f"* Config [{cfg_i}/{len(CONFIGS)}]: {exp['name']}")
+            print(f"*   marginal_scale={exp['marginal_scale']}  corr_formula={exp['corr_formula']}"
+                  f"  corr_noise={exp['corr_noise']}  corr_delta={exp['corr_delta']}")
+            print(f"{'*'*60}")
 
-        for eps_i, epsilon in enumerate(EPSILONS, 1):
-            label   = eps_label(epsilon)
-            eps_str = str(epsilon) if epsilon is not None else "∞ (no DP)"
-            print(f"\n{'#'*60}")
-            print(f"# ε = {eps_str}  [{eps_i}/{len(EPSILONS)}]")
-            print(f"{'#'*60}")
+            sweep: dict[str, dict[str, tuple[float, float]]] = {}
 
-            sweep[label] = {}
-            for ds_i, cfg in enumerate(DATASETS, 1):
-                run_idx += 1
-                meta = load_metadata(cfg["meta"])
-                name = Path(meta["filename"]).stem
+            for eps_i, epsilon in enumerate(EPSILONS, 1):
+                label   = eps_label(epsilon)
+                eps_str = str(epsilon) if epsilon is not None else "∞ (no DP)"
+                print(f"\n{'#'*60}")
+                print(f"# ε = {eps_str}  [{eps_i}/{len(EPSILONS)}]")
+                print(f"{'#'*60}")
 
-                elapsed_g = time.perf_counter() - t_global
-                print(f"\n--- Run {run_idx}/{n_total}  |  "
-                      f"ε={eps_str}  |  dataset {ds_i}/{len(DATASETS)}  |  "
-                      f"global elapsed {elapsed_g:.0f}s ---")
+                sweep[label] = {}
+                for ds_i, cfg in enumerate(DATASETS, 1):
+                    run_idx += 1
+                    meta = load_metadata(cfg["meta"])
+                    name = Path(meta["filename"]).stem
 
-                t_ds = time.perf_counter()
-                mean_bias, mean_cov = run_dataset(cfg, epsilon=epsilon, label=label)
-                ds_time = time.perf_counter() - t_ds
+                    elapsed_g = time.perf_counter() - t_global
+                    print(f"\n--- Run {run_idx}/{n_total}  |  config={exp['name']}  |  "
+                          f"ε={eps_str}  |  dataset {ds_i}/{len(DATASETS)}  |  "
+                          f"elapsed {elapsed_g:.0f}s ---")
 
-                sweep[label][name] = (mean_bias, mean_cov)
-                print(f"  Dataset done in {ds_time:.0f}s")
+                    t_ds = time.perf_counter()
+                    mean_bias, mean_cov = run_dataset(cfg, epsilon=epsilon,
+                                                      label=f"{exp['name']}/{label}",
+                                                      exp=exp)
+                    ds_time = time.perf_counter() - t_ds
+
+                    sweep[label][name] = (mean_bias, mean_cov)
+                    print(f"  Dataset done in {ds_time:.0f}s")
+
+            print_and_save_table(sweep, config_name=exp["name"])
 
         elapsed_total = time.perf_counter() - t_global
         print(f"\n{'='*60}")
         print(f"All {n_total} runs complete in {elapsed_total:.0f}s "
               f"({elapsed_total/60:.1f} min)")
         print(f"Run finished : {datetime.now().isoformat(timespec='seconds')}")
-
-        print_and_save_table(sweep)
         print("\nAll done.")
 
     finally:
