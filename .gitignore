@@ -12,7 +12,7 @@ wheels/
 data/
 logs/   
 reports/
-metadata/
+.metadata/
 models/
 paper/
 results/

@@ -17,5 +17,6 @@ dependencies = [
     "sdmetrics>=0.25.0",
     "sdv>=1.32.1",
     "seaborn>=0.13.2",
+    "statsmodels>=0.14.6",
     "xgboost>=3.2.0",
 ]
